@@ -1,7 +1,7 @@
 "use strict";
 /*! noble-secp256k1 - MIT License (c) Paul Miller (paulmillr.com) */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.utils = exports.schnorr = exports.verify = exports.signSync = exports.sign = exports.getSharedSecret = exports.recoverPublicKey = exports.getPublicKey = exports.SignResult = exports.Signature = exports.Point = exports.CURVE = void 0;
+exports.utils = exports.schnorr = exports.verify = exports._syncSign = exports.sign = exports.getSharedSecret = exports.recoverPublicKey = exports.getPublicKey = exports.SignResult = exports.Signature = exports.Point = exports.CURVE = void 0;
 const CURVE = {
     a: 0n,
     b: 7n,
@@ -280,6 +280,7 @@ class Point {
     static fromSignature(msgHash, signature, recovery) {
         let h = msgHash instanceof Uint8Array ? bytesToNumber(msgHash) : hexToNumber(msgHash);
         const sig = normalizeSignature(signature);
+        sig.assertValidity();
         const { r, s } = sig;
         if (recovery !== 0 && recovery !== 1) {
             throw new Error('Cannot recover signature: invalid yParity bit');
@@ -353,58 +354,41 @@ class Signature {
         this.r = r;
         this.s = s;
     }
-    static fromCompact(hex) {
+    static fromHex(hex) {
         if (typeof hex !== 'string' && !(hex instanceof Uint8Array)) {
-            throw new TypeError(`Signature.fromCompact: Expected string or Uint8Array`);
-        }
-        const str = hex instanceof Uint8Array ? bytesToHex(hex) : hex;
-        if (str.length !== 128)
-            throw new Error('Signature.fromCompact: Expected 64-byte hex');
-        const sig = new Signature(hexToNumber(str.slice(0, 64)), hexToNumber(str.slice(64, 128)));
-        sig.assertValidity();
-        return sig;
-    }
-    static fromDER(hex) {
-        const fn = 'Signature.fromDER';
-        if (typeof hex !== 'string' && !(hex instanceof Uint8Array)) {
-            throw new TypeError(`${fn}: Expected string or Uint8Array`);
+            throw new TypeError(`Signature.fromHex: Expected string or Uint8Array`);
         }
         const str = hex instanceof Uint8Array ? bytesToHex(hex) : hex;
         const length = parseByte(str.slice(2, 4));
         if (str.slice(0, 2) !== '30' || length !== str.length - 4 || str.slice(4, 6) !== '02') {
-            throw new Error(`${fn}: Invalid signature ${str}`);
+            throw new Error('Signature.fromHex: Invalid signature');
         }
         const rLen = parseByte(str.slice(6, 8));
         const rEnd = 8 + rLen;
         const rr = str.slice(8, rEnd);
         if (rr.startsWith('00') && parseByte(rr.slice(2, 4)) <= 0x7f) {
-            throw new Error(`${fn}: Invalid r with trailing length`);
+            throw new Error('Signature.fromHex: Invalid r with trailing length');
         }
         const r = hexToNumber(rr);
         const separator = str.slice(rEnd, rEnd + 2);
         if (separator !== '02') {
-            throw new Error(`${fn}: Invalid r-s separator`);
+            throw new Error('Signature.fromHex: Invalid r-s separator');
         }
         const sLen = parseByte(str.slice(rEnd + 2, rEnd + 4));
         const diff = length - sLen - rLen - 10;
         if (diff > 0 || diff === -4) {
-            throw new Error(`${fn}: Invalid total length`);
+            throw new Error(`Signature.fromHex: Invalid total length`);
         }
         if (sLen > length - rLen - 4) {
-            throw new Error(`${fn}: Invalid s`);
+            throw new Error(`Signature.fromHex: Invalid s`);
         }
         const sStart = rEnd + 4;
         const ss = str.slice(sStart, sStart + sLen);
         if (ss.startsWith('00') && parseByte(ss.slice(2, 4)) <= 0x7f) {
-            throw new Error(`${fn}: Invalid s with trailing length`);
+            throw new Error(`Signature.fromHex: Invalid s with trailing length`);
         }
         const s = hexToNumber(ss);
-        const sig = new Signature(r, s);
-        sig.assertValidity();
-        return sig;
-    }
-    static fromHex(hex) {
-        return this.fromDER(hex);
+        return new Signature(r, s);
     }
     assertValidity() {
         const { r, s } = this;
@@ -413,10 +397,10 @@ class Signature {
         if (!isWithinCurveOrder(s))
             throw new Error('Invalid Signature: s must be 0 < s < n');
     }
-    toDERRawBytes(isCompressed = false) {
-        return hexToBytes(this.toDERHex(isCompressed));
+    toRawBytes(isCompressed = false) {
+        return hexToBytes(this.toHex(isCompressed));
     }
-    toDERHex(isCompressed = false) {
+    toHex(isCompressed = false) {
         const sHex = sliceDer(numberToHex(this.s));
         if (isCompressed)
             return sHex;
@@ -425,18 +409,6 @@ class Signature {
         const sLen = numberToHex(sHex.length / 2);
         const length = numberToHex(rHex.length / 2 + sHex.length / 2 + 4);
         return `30${length}02${rLen}${rHex}02${sLen}${sHex}`;
-    }
-    toRawBytes() {
-        return this.toDERRawBytes();
-    }
-    toHex() {
-        return this.toDERHex();
-    }
-    toCompactRawBytes() {
-        return hexToBytes(this.toCompactHex());
-    }
-    toCompactHex() {
-        return pad64(this.r) + pad64(this.s);
     }
 }
 exports.Signature = Signature;
@@ -646,9 +618,7 @@ async function getQRSrfc6979(msgHash, privateKey) {
 function getQRSrfc6979Sync(msgHash, privateKey) {
     const privKey = normalizePrivateKey(privateKey);
     let [h1, h1n, x, v, k, b0, b1] = _abc6979(msgHash, privKey);
-    const hmac = exports.utils.hmacSha256Sync;
-    if (!hmac)
-        throw new Error('utils.hmacSha256Sync is undefined, you need to set it');
+    const hmac = exports.utils.hmacSha256;
     k = hmac(k, v, b0, x, h1);
     if (k instanceof Promise)
         throw new Error('To use sync sign(), ensure utils.hmacSha256 is sync');
@@ -689,13 +659,13 @@ function normalizePrivateKey(key) {
         num = BigInt(key);
     }
     else if (typeof key === 'string') {
-        if (key.length !== 64)
-            throw new Error('Expected 32 bytes of private key');
+        // if (key.length !== 64)
+        //     throw new Error('Expected 32 bytes of private key');
         num = hexToNumber(key);
     }
     else if (key instanceof Uint8Array) {
-        if (key.length !== 32)
-            throw new Error('Expected 32 bytes of private key');
+        // if (key.length !== 32)
+        //     throw new Error('Expected 32 bytes of private key');
         num = bytesToNumber(key);
     }
     else {
@@ -706,22 +676,10 @@ function normalizePrivateKey(key) {
     return num;
 }
 function normalizePublicKey(publicKey) {
-    if (publicKey instanceof Point) {
-        publicKey.assertValidity();
-        return publicKey;
-    }
-    else {
-        return Point.fromHex(publicKey);
-    }
+    return publicKey instanceof Point ? publicKey : Point.fromHex(publicKey);
 }
 function normalizeSignature(signature) {
-    if (signature instanceof Signature) {
-        signature.assertValidity();
-        return signature;
-    }
-    else {
-        return Signature.fromDER(signature);
-    }
+    return signature instanceof Signature ? signature : Signature.fromHex(signature);
 }
 function getPublicKey(privateKey, isCompressed = false) {
     const point = Point.fromPrivateKey(privateKey);
@@ -763,7 +721,7 @@ function getSharedSecret(privateA, publicB, isCompressed = false) {
 exports.getSharedSecret = getSharedSecret;
 function QRSToSig(qrs, opts, str = false) {
     const [q, r, s] = qrs;
-    let { canonical, der, recovered } = opts;
+    let { canonical, recovered } = opts;
     let recovery = (q.x === r ? 0 : 2) | Number(q.y & 1n);
     let adjustedS = s;
     const HIGH_NUMBER = CURVE.n >> 1n;
@@ -772,24 +730,22 @@ function QRSToSig(qrs, opts, str = false) {
         recovery ^= 1;
     }
     const sig = new Signature(r, adjustedS);
-    sig.assertValidity();
-    const hex = der === false ? sig.toCompactHex() : sig.toDERHex();
-    const hashed = str ? hex : hexToBytes(hex);
+    const hashed = str ? sig.toHex() : sig.toRawBytes();
     return recovered ? [hashed, recovery] : hashed;
 }
 async function sign(msgHash, privKey, opts = {}) {
     return QRSToSig(await getQRSrfc6979(msgHash, privKey), opts, typeof msgHash === 'string');
 }
 exports.sign = sign;
-function signSync(msgHash, privKey, opts = {}) {
+function _syncSign(msgHash, privKey, opts = {}) {
     return QRSToSig(getQRSrfc6979Sync(msgHash, privKey), opts, typeof msgHash === 'string');
 }
-exports.signSync = signSync;
+exports._syncSign = _syncSign;
 function verify(signature, msgHash, publicKey) {
     const { n } = CURVE;
-    let sig;
+    const sig = normalizeSignature(signature);
     try {
-        sig = normalizeSignature(signature);
+        sig.assertValidity();
     }
     catch (error) {
         return false;
@@ -827,7 +783,7 @@ class SchnorrSignature {
     constructor(r, s) {
         this.r = r;
         this.s = s;
-        if (r <= 0n || s <= 0n || r >= CURVE.P || s >= CURVE.n)
+        if (r === 0n || s === 0n || r >= CURVE.P || s >= CURVE.n)
             throw new Error('Invalid signature');
     }
     static fromHex(hex) {
@@ -897,14 +853,6 @@ exports.schnorr = {
     verify: schnorrVerify,
 };
 Point.BASE._setWindowSize(8);
-const crypto = (() => {
-    const webCrypto = typeof self === 'object' && 'crypto' in self ? self.crypto : undefined;
-    const nodeRequire = typeof module !== 'undefined' && typeof require === 'function';
-    return {
-        node: nodeRequire && !webCrypto ? require('crypto') : undefined,
-        web: webCrypto,
-    };
-})();
 exports.utils = {
     isValidPrivateKey(privateKey) {
         try {
@@ -916,11 +864,11 @@ exports.utils = {
         }
     },
     randomBytes: (bytesLength = 32) => {
-        if (crypto.web) {
-            return crypto.web.getRandomValues(new Uint8Array(bytesLength));
+        if (typeof self == 'object' && 'crypto' in self) {
+            return self.crypto.getRandomValues(new Uint8Array(bytesLength));
         }
-        else if (crypto.node) {
-            const { randomBytes } = crypto.node;
+        else if (typeof process === 'object' && 'node' in process.versions) {
+            const { randomBytes } = require('crypto');
             return new Uint8Array(randomBytes(bytesLength).buffer);
         }
         else {
@@ -932,18 +880,18 @@ exports.utils = {
         while (i--) {
             const b32 = exports.utils.randomBytes(32);
             const num = bytesToNumber(b32);
-            if (isWithinCurveOrder(num) && num !== 1n)
+            if (num > 1n && num < CURVE.n)
                 return b32;
         }
         throw new Error('Valid private key was not found in 8 iterations. PRNG is broken');
     },
     sha256: async (message) => {
-        if (crypto.web) {
-            const buffer = await crypto.web.subtle.digest('SHA-256', message.buffer);
+        if (typeof self == 'object' && 'crypto' in self) {
+            const buffer = await self.crypto.subtle.digest('SHA-256', message.buffer);
             return new Uint8Array(buffer);
         }
-        else if (crypto.node) {
-            const { createHash } = crypto.node;
+        else if (typeof process === 'object' && 'node' in process.versions) {
+            const { createHash } = require('crypto');
             return Uint8Array.from(createHash('sha256').update(message).digest());
         }
         else {
@@ -951,14 +899,14 @@ exports.utils = {
         }
     },
     hmacSha256: async (key, ...messages) => {
-        if (crypto.web) {
-            const ckey = await crypto.web.subtle.importKey('raw', key, { name: 'HMAC', hash: { name: 'SHA-256' } }, false, ['sign']);
+        if (typeof self == 'object' && 'crypto' in self) {
+            const ckey = await self.crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: { name: 'SHA-256' } }, false, ['sign']);
             const message = concatBytes(...messages);
-            const buffer = await crypto.web.subtle.sign('HMAC', ckey, message);
+            const buffer = await self.crypto.subtle.sign('HMAC', ckey, message);
             return new Uint8Array(buffer);
         }
-        else if (crypto.node) {
-            const { createHmac } = crypto.node;
+        else if (typeof process === 'object' && 'node' in process.versions) {
+            const { createHmac } = require('crypto');
             const hash = createHmac('sha256', key);
             for (let message of messages) {
                 hash.update(message);
@@ -969,8 +917,6 @@ exports.utils = {
             throw new Error("The environment doesn't have hmac-sha256 function");
         }
     },
-    sha256Sync: undefined,
-    hmacSha256Sync: undefined,
     precompute(windowSize = 8, point = Point.BASE) {
         const cached = point === Point.BASE ? point : new Point(point.x, point.y);
         cached._setWindowSize(windowSize);

@@ -863,10 +863,10 @@ function normalizePrivateKey(key: PrivKey): bigint {
   } else if (typeof key === 'number' && Number.isSafeInteger(key) && key > 0) {
     num = BigInt(key);
   } else if (typeof key === 'string') {
-    if (key.length !== 64) throw new Error('Expected 32 bytes of private key');
+    // if (key.length !== 64) throw new Error('Expected 32 bytes of private key');
     num = hexToNumber(key);
   } else if (key instanceof Uint8Array) {
-    if (key.length !== 32) throw new Error('Expected 32 bytes of private key');
+    // if (key.length !== 32) throw new Error('Expected 32 bytes of private key');
     num = bytesToNumber(key);
   } else {
     throw new TypeError('Expected valid private key');
